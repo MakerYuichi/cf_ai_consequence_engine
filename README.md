@@ -9,7 +9,7 @@
 ## 🚀 Try It Now (No Setup Required)
 
 **Live deployed app:**
-👉 https://cf-ai-consequence-engine.cf-consequence.workers.dev
+👉 https://cf_ai_consequence_engine.cf-consequence.workers.dev/
 
 Open the link, type any decision you're wrestling with, and hit **Visualize →**
 
