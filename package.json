@@ -1,0 +1,15 @@
+{
+  "name": "cf_ai_consequence_engine",
+  "version": "1.0.0",
+  "description": "The Consequence Visualizer — AI-powered decision support via parallel future diary entries",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "wrangler": "^4.86.0"
+  },
+  "license": "MIT"
+}

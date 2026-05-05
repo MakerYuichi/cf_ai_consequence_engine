@@ -1,0 +1,24 @@
+{
+	// Cloudflare Worker configuration for the Consequence Visualizer
+	"name": "cf_ai_consequence_engine",
+	"main": "src/index.js",
+	"compatibility_date": "2024-11-01",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	// Workers AI binding — provides access to Llama 3.3 and other models
+	"ai": {
+		"binding": "AI"
+	},
+	// KV Namespace binding — stores decisions, diary entries, and outcomes
+	"kv_namespaces": [
+		{
+			"binding": "DECISIONS_KV",
+			"id": "971451a5bc6c4c81a3eaa5fd413bc58e"
+		}
+	],
+	// Serve the public/ folder as static assets via Cloudflare Pages-style routing
+	"assets": {
+		"directory": "./public"
+	}
+}
