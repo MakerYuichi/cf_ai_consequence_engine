@@ -3,7 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Consequence Visualizer</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Consequence Visualizer v2</title>
   <style>
     /* ── Reset & Base ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -536,7 +539,10 @@
     if (!commitment) { showToast('Add a commitment first.'); return; }
     if (!currentDecisionId) return;
 
+    const decision = document.getElementById('decisionInput').value.trim();
+
     try {
+      // 1. Save the commitment and get the nudge + checkinDate
       const res = await fetch(`${API_BASE}/api/commitment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -554,9 +560,36 @@
       bubble.textContent = data.nudge;
       show('aiBubble');
 
+      // 2. Launch the Workflow to schedule the check-in reminder
+      if (data.checkinDate) {
+        fetch(`${API_BASE}/api/schedule-checkin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: SESSION_ID,
+            decisionId: currentDecisionId,
+            decision,
+            userChoice: currentChoice,
+            commitment,
+            checkinDate: data.checkinDate,
+          }),
+        }).then(r => r.json()).then(wf => {
+          if (wf.workflowInstanceId) {
+            // Store the instance ID so we can poll status later
+            localStorage.setItem(`wf_${currentDecisionId}`, wf.workflowInstanceId);
+          }
+        }).catch(() => {}); // Non-blocking — don't fail the UX if workflow scheduling fails
+      }
+
       hide('choiceSection');
       document.getElementById('commitmentInput').value = '';
-      showToast('✓ Commitment saved. Check-in scheduled.');
+      showToast('✓ Commitment saved. Check-in reminder scheduled.');
+
+      // Refresh history panel if it's open so commitment shows immediately
+      const panel = document.getElementById('historyPanel');
+      if (panel.classList.contains('active')) {
+        await loadHistory();
+      }
     } catch (err) {
       showToast('Error: ' + err.message);
     }
@@ -569,6 +602,7 @@
       hide('historyPanel');
       return;
     }
+    // Always reload fresh data when opening
     await loadHistory();
     show('historyPanel');
   }
@@ -583,28 +617,86 @@
     }
   }
 
+  // Store decisions array so handlers can look up by index safely
+  let _historyDecisions = [];
+
   function renderHistory(decisions) {
+    _historyDecisions = decisions;
     const list = document.getElementById('historyList');
     if (!decisions.length) {
       list.innerHTML = '<p style="color:var(--muted);font-size:0.9rem;">No past decisions yet.</p>';
       return;
     }
-    list.innerHTML = decisions.map(d => {
+    list.innerHTML = decisions.map((d, i) => {
       const date = new Date(d.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-      const chosen = d.userChoice ? ` · Chose: ${d.userChoice}` : '';
-      const rating = d.accuracyRating ? ` · Accuracy: ${'★'.repeat(d.accuracyRating)}` : '';
-      const outcome = d.actualOutcome ? `<div style="color:var(--muted);font-size:0.82rem;margin-top:0.25rem;">Outcome: "${d.actualOutcome.slice(0,80)}${d.actualOutcome.length>80?'…':''}"</div>` : '';
-      const checkinBtn = !d.actualOutcome
-        ? `<button class="btn-secondary checkin-btn" onclick="openCheckin('${d.decisionId}', '${escHtml(d.decision)}')">Check in →</button>`
+
+      // Chosen path — coloured label
+      const chosenColor = d.userChoice === 'Path A' ? 'var(--accent-a)' : 'var(--accent-b)';
+      const chosenBadge = d.userChoice
+        ? `<span style="color:${chosenColor};font-weight:600;"> · ${escHtml(d.userChoice)}</span>`
         : '';
+
+      const rating = d.accuracyRating ? ` · ${'★'.repeat(d.accuracyRating)}${'☆'.repeat(5 - d.accuracyRating)}` : '';
+      const checkinDateStr = d.checkinDate
+        ? ` · Check-in: ${new Date(d.checkinDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+        : '';
+
+      // Commitment — shown prominently if it exists
+      const commitment = d.commitment
+        ? `<div style="margin-top:0.5rem;padding:0.5rem 0.75rem;background:var(--surface2);border-radius:8px;font-size:0.88rem;color:#c8c8e0;">
+             📌 <strong>Commitment:</strong> ${escHtml(d.commitment)}
+           </div>`
+        : '';
+
+      // Chosen path diary text — shown inline, truncated with expand toggle
+      const chosenDiary = d.userChoice === 'Path A' ? d.pathA_diary : d.pathB_diary;
+      const diaryBlock = chosenDiary
+        ? `<div style="margin-top:0.5rem;">
+             <div id="diary-preview-${i}" style="font-size:0.83rem;line-height:1.6;color:var(--muted);font-style:italic;border-left:2px solid ${chosenColor};padding-left:0.75rem;white-space:pre-wrap;">${escHtml(chosenDiary.slice(0, 200))}${chosenDiary.length > 200 ? '…' : ''}</div>
+             ${chosenDiary.length > 200 ? `<div id="diary-full-${i}" style="display:none;font-size:0.83rem;line-height:1.6;color:var(--muted);font-style:italic;border-left:2px solid ${chosenColor};padding-left:0.75rem;white-space:pre-wrap;">${escHtml(chosenDiary)}</div>
+             <button class="btn-secondary" style="font-size:0.75rem;padding:0.25rem 0.6rem;margin-top:0.35rem;" onclick="toggleDiary(${i})">Read more</button>` : ''}
+           </div>`
+        : '';
+
+      const outcome = d.actualOutcome
+        ? `<div style="color:var(--muted);font-size:0.82rem;margin-top:0.4rem;">✓ <strong>Outcome:</strong> "${escHtml(d.actualOutcome.slice(0,120))}${d.actualOutcome.length>120?'…':''}"</div>`
+        : '';
+
+      // AI reminder from Workflow
+      const reminder = d.checkinReady && d.reminderText && !d.actualOutcome
+        ? `<div style="background:rgba(124,106,247,0.1);border-left:3px solid var(--accent-a);border-radius:0 8px 8px 0;padding:0.6rem 0.9rem;margin-top:0.5rem;font-size:0.85rem;color:#c8c8e0;font-style:italic;">${escHtml(d.reminderText)}</div>`
+        : '';
+
+      const checkinBtn = !d.actualOutcome
+        ? `<button class="btn-secondary checkin-btn" onclick="openCheckinByIndex(${i})">Check in →</button>`
+        : '';
+
       return `
         <div class="history-item">
           <div class="decision-text">${escHtml(d.decision)}</div>
-          <div class="meta">${date}${chosen}${rating}</div>
+          <div class="meta">${date}${chosenBadge}${rating}${checkinDateStr}</div>
+          ${commitment}
+          ${diaryBlock}
           ${outcome}
+          ${reminder}
           ${checkinBtn}
         </div>`;
     }).join('');
+  }
+
+  function toggleDiary(i) {
+    const preview = document.getElementById(`diary-preview-${i}`);
+    const full = document.getElementById(`diary-full-${i}`);
+    const btn = full.nextElementSibling;
+    const isExpanded = full.style.display !== 'none';
+    preview.style.display = isExpanded ? '' : 'none';
+    full.style.display = isExpanded ? 'none' : '';
+    btn.textContent = isExpanded ? 'Read more' : 'Show less';
+  }
+
+  function openCheckinByIndex(i) {
+    const d = _historyDecisions[i];
+    if (d) openCheckin(d.decisionId, d.decision);
   }
 
   // ── Check-in Modal ───────────────────────────────────────────────────────────

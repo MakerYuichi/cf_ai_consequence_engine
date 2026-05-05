@@ -3,7 +3,7 @@
 This file documents two categories of prompts:
 
 1. **Runtime prompts** — prompts sent to Llama 3.3 at runtime inside the app
-2. **Development prompts** — prompts used with AI coding assistant (Kiro/Claude) to build the app
+2. **Development prompts** — prompts used with AI coding assistant (Kiro) to build the app
 
 ---
 
@@ -13,7 +13,7 @@ This file documents two categories of prompts:
 
 ### 1.1 System Prompt
 
-Used as the `system` role message in **every** AI call across all four routes. Sets the persona and tone for the entire app.
+Used as the `system` role message in **every** AI call across all routes. Sets the persona and tone for the entire app.
 
 ```
 You are the Consequence Visualizer — an empathetic AI that helps people emotionally
@@ -35,10 +35,9 @@ honest complexity. Avoid clichés. Make it feel like a real person wrote it.
 ```
 
 **Design notes:**
-- Sets emotional tone before any user content arrives
 - "Not motivational posters" is a deliberate negative constraint — LLMs default to optimistic framing without it
 - "Whole self, not just rational mind" primes the model for emotional rather than analytical output
-- Shared across all routes so persona stays consistent without repetition
+- Shared across all routes so persona stays consistent without repetition in every prompt
 
 ---
 
@@ -70,7 +69,7 @@ have genuine trade-offs.
 
 **Variables injected at runtime:**
 - `{decision}` — user's raw input (e.g. `"Should I quit my job?"`)
-- `{historyContext}` — optional block of past decisions from KV (see 1.2a)
+- `{historyContext}` — optional block of past decisions from KV (see 1.2a below)
 
 **Why delimiter markers instead of JSON:**
 - Llama 3.3 reliably follows delimiter-based formats for creative prose
@@ -96,7 +95,7 @@ User's past decisions for context:
 
 **Design notes:**
 - Capped at 5 most recent decisions to stay within token budget
-- Allows the AI to surface patterns: *"You've chosen the bold path 3 times — how's that working?"*
+- Allows the AI to surface behavioral patterns across decisions
 - Outcome and accuracy data makes future diary entries more calibrated over time
 
 ---
@@ -130,7 +129,7 @@ Keep it human and grounded — not cheesy.
 
 **Model parameters:**
 - `max_tokens: 300` — short nudge, not an essay
-- `temperature: 0.8` — warm and varied but not erratic
+- `temperature: 0.8`
 
 ---
 
@@ -174,6 +173,40 @@ them grow.
 
 ---
 
+### 1.5 Workflow Reminder Prompt — `CheckinWorkflow` (step 2)
+
+Generated inside the Cloudflare Workflow after it wakes from its 7-day sleep. Writes a personalized reminder that surfaces in the user's Past Decisions panel.
+
+```
+A week ago, someone faced this decision: "{decision}"
+They chose: {userChoice}
+Their 24-hour commitment was: "{commitment}"
+
+Today ({checkinDate}) is their scheduled check-in day. Write a warm 2-sentence
+reminder that:
+1. References their specific decision and commitment
+2. Invites them to come back and record what actually happened
+
+Keep it personal and grounded — not generic.
+```
+
+**Variables injected at runtime:**
+- `{decision}` — original decision text (passed as Workflow payload)
+- `{userChoice}` — which path they chose
+- `{commitment}` — their 24-hour commitment
+- `{checkinDate}` — formatted check-in date (e.g. `"Tuesday, May 12"`)
+
+**Why this runs inside the Workflow (not the Worker):**
+- The Workflow wakes up 7 days later with full context from its payload
+- The reminder is generated at the moment it's needed, not stored cold for a week
+- If the user never comes back, the reminder is still written and waiting in KV
+
+**Model parameters:**
+- `max_tokens: 200` — two sentences only
+- `temperature: 0.75`
+
+---
+
 ### Prompt Engineering Summary
 
 | Decision | Rationale |
@@ -185,19 +218,18 @@ them grow.
 | First-person diary format | Creates emotional identification — reader becomes the protagonist |
 | "One year from now" timeframe | Long enough to show real consequences; short enough to feel concrete |
 | Shared system prompt | Keeps persona consistent across all routes without repetition |
+| Reminder generated at wake-up time | More relevant and timely than pre-generating and storing for 7 days |
 
 ---
 
-## Part 2: Development Prompts (used with AI coding assistant to build this app)
-
-These are the prompts used with Kiro (AI coding assistant powered by Claude) during development.
+## Part 2: Development Prompts (used with Kiro to build this app)
 
 ---
 
 ### 2.1 Initial Project Scaffold
 
 ```
-Build the complete Consequence Visualizer project for a Cloudflare Workers AI 
+Build the complete Consequence Visualizer project for a Cloudflare Workers AI
 submission. Full spec:
 
 - Cloudflare Worker backend (src/index.js) with routes:
@@ -206,7 +238,7 @@ submission. Full spec:
   POST /api/checkin — record real outcome, return AI reflection
   GET /api/history — return all past decisions for a session
 
-- Cloudflare KV for memory: store decision, both diary entries, user choice, 
+- Cloudflare KV for memory: store decision, both diary entries, user choice,
   commitment, checkin date, actual outcome, accuracy rating
 
 - Vanilla HTML/CSS/JS frontend (public/index.html) — no framework
@@ -219,10 +251,8 @@ submission. Full spec:
 
 - wrangler.jsonc config with AI binding and KV namespace binding
 - package.json with wrangler dev/deploy scripts
-- README.md with setup instructions
-- PROMPTS.md documenting all AI prompts
 
-Stack: Vanilla HTML/CSS/JS frontend, Cloudflare Workers backend, 
+Stack: Vanilla HTML/CSS/JS frontend, Cloudflare Workers backend,
 Llama 3.3 via Workers AI, Cloudflare KV for state.
 Repo name must be cf_ai_consequence_engine.
 ```
@@ -232,83 +262,58 @@ Repo name must be cf_ai_consequence_engine.
 ### 2.2 Frontend Styling Direction
 
 ```
-The frontend should feel like a thoughtful journaling app — dark theme, 
-serif font for the diary entries, two-column layout for the parallel paths. 
-Use CSS custom properties for theming. Path A accented in purple (#7c6af7), 
-Path B in rose (#f76a8a). Include a loading state with animated dots, 
-toast notifications, and a modal for the check-in flow. 
+The frontend should feel like a thoughtful journaling app — dark theme,
+serif font for the diary entries, two-column layout for the parallel paths.
+Use CSS custom properties for theming. Path A accented in purple (#7c6af7),
+Path B in rose (#f76a8a). Include a loading state with animated dots,
+toast notifications, and a modal for the check-in flow.
 No external CSS libraries — pure CSS only.
 ```
 
 ---
 
-### 2.3 KV Data Structure Design
+### 2.3 Adding Cloudflare Workflows for Scheduled Check-ins
 
 ```
-Design the KV schema for storing decisions. Each record should include:
-decisionId, decision text, timestamp, pathA_diary, pathB_diary, userChoice, 
-commitment, checkinDate (7 days out), actualOutcome, accuracyRating.
+The app currently uses a Worker + KV but has no Workflow or Durable Object.
+The assignment rubric requires workflow/coordination. Add a Cloudflare Workflow
+(src/checkin-workflow.js) that:
 
-Store a session index at index:{sessionId} as a JSON array of decisionIds 
-so we can retrieve all decisions for a user without KV list operations.
-Use 1-year TTL on all keys.
-```
+1. Is triggered when a user saves a commitment (POST /api/schedule-checkin)
+2. Sleeps until the check-in date (7 days out)
+3. Wakes up and calls Llama 3.3 to generate a personalized reminder
+4. Writes checkinReady: true and the reminder text back to KV
 
----
+Also add:
+- POST /api/schedule-checkin route in index.js
+- GET /api/workflow-status route for polling
+- Export CheckinWorkflow from index.js (required by Workflows)
+- workflows binding in wrangler.jsonc
+- Frontend: call schedule-checkin after saving commitment (non-blocking)
+- Frontend: show the AI reminder in the history panel when checkinReady is true
 
-### 2.4 Prompt Engineering for Diary Generation
-
-```
-Design the prompt for Llama 3.3 to generate two parallel future diary entries. 
-Requirements:
-- Both paths must feel emotionally real — not propaganda for one choice
-- Use structured delimiters (PATH_A_START/END) for reliable server-side parsing
-- First person, specific dates, sensory details, genuine trade-offs
-- System prompt should establish an empathetic, non-judgmental persona
-- Inject past decision history from KV for pattern recognition
-- temperature 0.85, max_tokens 1200
+Use a deterministic workflow instance ID (checkin-{sessionId}-{decisionId})
+so re-submitting never creates duplicates.
 ```
 
 ---
 
-### 2.5 Debugging the KV Namespace Config
+### 2.4 Fixing the SSL/Deployment URL Issue
 
 ```
-The wrangler.jsonc has a duplicate KV namespace entry — one with placeholder IDs 
-and one with the real ID that Wrangler appended automatically. 
-Clean it up to keep only the real ID: 971451a5bc6c4c81a3eaa5fd413bc58e
-```
-
----
-
-### 2.6 Fixing the SSL/Deployment URL Issue
-
-```
-The deployed Worker URL cf_ai_consequence_engine.cf-consequence.workers.dev 
-gives ERR_SSL_VERSION_OR_CIPHER_MISMATCH because underscores are invalid in 
-hostnames. Rename the worker in wrangler.jsonc from cf_ai_consequence_engine 
+The deployed Worker URL cf_ai_consequence_engine.cf-consequence.workers.dev
+gives ERR_SSL_VERSION_OR_CIPHER_MISMATCH because underscores are invalid in
+hostnames. Rename the worker in wrangler.jsonc from cf_ai_consequence_engine
 to cf-ai-consequence-engine so the URL uses hyphens and TLS works correctly.
 ```
 
 ---
 
-### 2.7 README and PROMPTS Documentation
+### 2.5 Fixing node_modules Committed to Git
 
 ```
-Write a complete README.md for the cf_ai_consequence_engine project with:
-- Live demo link at the top
-- What it does (5-step user flow)
-- Architecture diagram (ASCII)
-- Stack table
-- Prerequisites
-- Step-by-step local setup (clone, wrangler login, create KV, run dev)
-- Deployment instructions
-- Full API reference with request/response examples
-- KV memory schema
-- Key features list
-
-Also write PROMPTS.md documenting every runtime prompt sent to Llama 3.3, 
-including variables, model parameters, and the reasoning behind each 
-prompt engineering decision. Also include the development prompts used 
-to build the app with the AI coding assistant.
+git push failed because node_modules/@cloudflare/workerd-darwin-arm64/bin/workerd
+is 103MB and exceeds GitHub's 100MB limit. The .gitignore was created after the
+initial commit so node_modules was already tracked. Remove it from git history
+entirely using git filter-repo, then force push the clean history.
 ```

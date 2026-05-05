@@ -2,15 +2,20 @@
  * Consequence Visualizer — Cloudflare Worker
  *
  * Routes:
- *   POST /api/decide      — Generate two future diary entries for a decision
- *   POST /api/checkin     — Follow up on a past decision / record outcome
- *   GET  /api/history     — Retrieve all past decisions for a session
- *   POST /api/commitment  — Save a 24-hour commitment to a decision
+ *   POST /api/decide           — Generate two future diary entries for a decision
+ *   POST /api/checkin          — Follow up on a past decision / record outcome
+ *   GET  /api/history          — Retrieve all past decisions for a session
+ *   POST /api/commitment       — Save a 24-hour commitment to a decision
+ *   POST /api/schedule-checkin — Launch a Workflow to send a reminder on check-in date
+ *   GET  /api/workflow-status  — Poll the status of a running Workflow instance
  *
  * Bindings (wrangler.jsonc):
- *   AI            — Workers AI (Llama 3.3)
- *   DECISIONS_KV  — KV namespace for persistent memory
+ *   AI               — Workers AI (Llama 3.3)
+ *   DECISIONS_KV     — KV namespace for persistent memory
+ *   CHECKIN_WORKFLOW — Cloudflare Workflow for durable scheduled check-ins
  */
+
+export { CheckinWorkflow } from "./checkin-workflow.js";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -41,6 +46,32 @@ export default {
       }
       if (url.pathname === "/api/commitment" && request.method === "POST") {
         return await handleCommitment(request, env);
+      }
+      if (url.pathname === "/api/schedule-checkin" && request.method === "POST") {
+        return await handleScheduleCheckin(request, env);
+      }
+      if (url.pathname === "/api/workflow-status" && request.method === "GET") {
+        return await handleWorkflowStatus(request, env);
+      }
+      if (url.pathname === "/api/debug" && request.method === "GET") {
+        const sessionId = url.searchParams.get("sessionId");
+        if (!sessionId) return jsonResponse({ error: "sessionId required" }, 400);
+        const indexKey = `index:${sessionId}`;
+        const ids = await env.DECISIONS_KV.get(indexKey, "json") ?? [];
+        const records = await Promise.all(ids.map(id => env.DECISIONS_KV.get(`${sessionId}:${id}`, "json")));
+        return jsonResponse({ ids, records });
+      }
+
+      // Serve index.html for root and any non-API path
+      if (!url.pathname.startsWith("/api/")) {
+        const html = await env.ASSETS.fetch(new Request("https://fake-host/index.html"));
+        return new Response(html.body, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+          },
+        });
       }
 
       return jsonResponse({ error: "Not found" }, 404);
@@ -221,6 +252,69 @@ async function handleCommitment(request, env) {
   });
 }
 
+/**
+ * POST /api/schedule-checkin
+ * Body: { sessionId, decisionId, decision, userChoice, commitment, checkinDate }
+ * Launches a Cloudflare Workflow that sleeps until checkinDate, then marks
+ * the decision as ready for check-in and generates an AI reminder.
+ */
+async function handleScheduleCheckin(request, env) {
+  const body = await request.json();
+  const { sessionId, decisionId, decision, userChoice, commitment, checkinDate } = body;
+
+  if (!sessionId || !decisionId || !checkinDate) {
+    return jsonResponse({ error: "sessionId, decisionId, and checkinDate are required" }, 400);
+  }
+
+  // Use a deterministic instance ID so re-scheduling the same decision
+  // doesn't create duplicate workflows.
+  const instanceId = `checkin-${sessionId}-${decisionId}`;
+
+  try {
+    const instance = await env.CHECKIN_WORKFLOW.create({
+      id: instanceId,
+      params: { sessionId, decisionId, decision, userChoice, commitment, checkinDate },
+    });
+
+    return jsonResponse({
+      workflowInstanceId: instance.id,
+      status: "scheduled",
+      checkinDate,
+    });
+  } catch (err) {
+    // If the workflow instance already exists, that's fine — it's already scheduled.
+    if (err.message?.includes("already exists")) {
+      return jsonResponse({
+        workflowInstanceId: instanceId,
+        status: "already_scheduled",
+        checkinDate,
+      });
+    }
+    throw err;
+  }
+}
+
+/**
+ * GET /api/workflow-status?instanceId=xxx
+ * Returns the current status of a Workflow instance.
+ */
+async function handleWorkflowStatus(request, env) {
+  const url = new URL(request.url);
+  const instanceId = url.searchParams.get("instanceId");
+
+  if (!instanceId) {
+    return jsonResponse({ error: "instanceId is required" }, 400);
+  }
+
+  try {
+    const instance = await env.CHECKIN_WORKFLOW.get(instanceId);
+    const status = await instance.status();
+    return jsonResponse({ instanceId, status });
+  } catch (err) {
+    return jsonResponse({ error: "Workflow instance not found", detail: err.message }, 404);
+  }
+}
+
 // ─── KV Helpers ───────────────────────────────────────────────────────────────
 
 async function saveDecision(env, sessionId, decisionId, record) {
@@ -254,7 +348,23 @@ async function loadHistory(env, sessionId) {
     ids.map((id) => env.DECISIONS_KV.get(`${sessionId}:${id}`, "json"))
   );
 
-  return records.filter(Boolean).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return records
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .map((r) => ({
+      decisionId: r.decisionId,
+      decision: r.decision,
+      timestamp: r.timestamp,
+      pathA_diary: r.pathA_diary ?? null,
+      pathB_diary: r.pathB_diary ?? null,
+      userChoice: r.userChoice ?? null,
+      commitment: r.commitment ?? null,
+      checkinDate: r.checkinDate ?? null,
+      checkinReady: r.checkinReady ?? false,
+      reminderText: r.reminderText ?? null,
+      actualOutcome: r.actualOutcome ?? null,
+      accuracyRating: r.accuracyRating ?? null,
+    }));
 }
 
 // ─── Prompt Builders ──────────────────────────────────────────────────────────
